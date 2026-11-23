@@ -1,0 +1,281 @@
+name: Build
+
+# Builds FrankenPHP (github.com/php/frankenphp) against each supported PHP
+# branch for Apple Silicon macOS and Windows x64, and publishes the binaries
+# as assets of a release named after the upstream tag:
+#
+#   frankenphp-mac-arm64-php<x.y.z>
+#   frankenphp-windows-x86_64-php<x.y.z>.zip   (flat, frankenphp.exe at the root)
+#
+# Only combinations not published yet are built, so the weekly run picks up
+# new FrankenPHP releases and new PHP patch releases and does nothing else.
+
+on:
+  workflow_dispatch:
+    inputs:
+      frankenphp:
+        description: "FrankenPHP tag (empty = newest stable)"
+        required: false
+        type: string
+      branches:
+        description: "PHP branches, space separated"
+        required: false
+        default: "8.2 8.3 8.4 8.5 8.6"
+        type: string
+      platforms:
+        description: "mac, windows or both"
+        required: false
+        default: "mac windows"
+        type: string
+  schedule:
+    - cron: "0 3 * * 1"
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      mac: ${{ steps.plan.outputs.mac }}
+      windows: ${{ steps.plan.outputs.windows }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.frankenphp }}
+          BRANCHES: ${{ inputs.branches || '8.2 8.3 8.4 8.5 8.6' }}
+          PLATFORMS: ${{ inputs.platforms || 'mac windows' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo php/frankenphp --json tagName --jq .tagName)
+          fi
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag $TAG"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          have=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          winlist=$(curl -fsSL https://downloads.php.net/~windows/releases/ \
+            | grep -oE 'php-[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?-Win32-vs[0-9]+-x64\.zip' | sort -u || true)
+
+          mac='[]'; win='[]'
+          for b in $BRANCHES; do
+            [[ "$b" =~ ^8\.[0-9]+$ ]] || { echo "bad branch $b"; exit 1; }
+            if [[ " $PLATFORMS " == *" mac "* ]]; then
+              v=$(curl -fsSL "https://www.php.net/releases/index.php?json&version=$b" | jq -r '.version // empty')
+              if [ -z "$v" ]; then
+                echo "::warning::no PHP release for $b on php.net"
+              elif grep -qx "frankenphp-mac-arm64-php$v" <<<"$have"; then
+                echo "mac $v already published"
+              else
+                mac=$(jq -c --arg b "$b" --arg v "$v" '. + [{branch:$b, php:$v}]' <<<"$mac")
+              fi
+            fi
+            if [[ " $PLATFORMS " == *" windows "* ]]; then
+              v=$(grep -E "^php-${b//./\\.}\.[0-9]+" <<<"$winlist" \
+                | sed -E 's/^php-([0-9.]+).*/\1/' | sort -V | tail -1 || true)
+              if [ -z "$v" ]; then
+                echo "::warning::no Windows PHP build for $b"
+              elif grep -qx "frankenphp-windows-x86_64-php$v.zip" <<<"$have"; then
+                echo "windows $v already published"
+              else
+                win=$(jq -c --arg b "$b" --arg v "$v" '. + [{branch:$b, php:$v}]' <<<"$win")
+              fi
+            fi
+          done
+          echo "mac=$mac" >> "$GITHUB_OUTPUT"
+          echo "windows=$win" >> "$GITHUB_OUTPUT"
+          echo "tag $TAG; mac $mac; windows $win"
+
+  mac:
+    needs: plan
+    if: needs.plan.outputs.mac != '[]'
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.mac) }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      TAG: ${{ needs.plan.outputs.tag }}
+      PHPV: ${{ matrix.php }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: php/frankenphp
+          ref: ${{ needs.plan.outputs.tag }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          cache: false
+      - name: Build FrankenPHP
+        run: |
+          export FRANKENPHP_VERSION="${TAG#v}"
+          PHP_VERSION="$PHPV" ./build-static.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: spc-log-mac-${{ matrix.php }}
+          path: dist/log
+      - name: Sanity checks
+        run: |
+          set -euo pipefail
+          bin=dist/frankenphp-mac-arm64
+          "$bin" version
+          "$bin" list-modules | grep -q frankenphp
+          got=$("$bin" php-cli -r 'echo PHP_VERSION;')
+          echo "embedded PHP $got"
+          [ "$got" = "$PHPV" ] || { echo "expected PHP $PHPV"; exit 1; }
+          mkdir -p out
+          cp "$bin" "out/frankenphp-mac-arm64-php$PHPV"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: out/frankenphp-mac-arm64-php${{ matrix.php }}
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "FrankenPHP $TAG" \
+                 --notes "FrankenPHP $TAG (github.com/php/frankenphp) built against several PHP versions. Unofficial builds made by this repository's Build workflow from upstream sources; see the README." \
+            || true
+          gh release upload "$TAG" "out/frankenphp-mac-arm64-php$PHPV" --repo "$GITHUB_REPOSITORY" --clobber
+
+  windows:
+    needs: plan
+    if: needs.plan.outputs.windows != '[]'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.windows) }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      PHPV: ${{ matrix.php }}
+      GOTOOLCHAIN: local
+      GOFLAGS: "-ldflags=-extldflags=-fuse-ld=lld -tags=nobadger,nomysql,nopgx,deprecated_topic,deprecated_claim"
+      PHP_DOWNLOAD_BASE: "https://downloads.php.net/~windows/releases/"
+      CC: clang
+      CXX: clang++
+      DIR_NAME: frankenphp-windows-x86_64
+    steps:
+      - name: Configure Git
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: php/frankenphp
+          ref: ${{ needs.plan.outputs.tag }}
+          path: frankenphp
+          persist-credentials: false
+      - uses: ./frankenphp/.github/actions/setup-go
+        with:
+          working-directory: frankenphp
+          cache: false
+      - name: Sync Vcpkg With Baseline
+        working-directory: frankenphp
+        run: |
+          $baseline = (Get-Content vcpkg.json | ConvertFrom-Json).'builtin-baseline'
+          git -C $env:VCPKG_INSTALLATION_ROOT fetch --quiet origin $baseline
+          git -C $env:VCPKG_INSTALLATION_ROOT checkout --quiet $baseline
+          & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+      - name: Install Vcpkg Libraries
+        working-directory: frankenphp
+        run: vcpkg install
+      - name: Download Watcher
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $latestTag = gh release list --repo e-dant/watcher --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName'
+          gh release download $latestTag --repo e-dant/watcher --pattern "*x86_64-pc-windows-msvc.tar" -O watcher.tar
+          tar -xf "watcher.tar" -C "$env:GITHUB_WORKSPACE"
+          Rename-Item -Path "$env:GITHUB_WORKSPACE\x86_64-pc-windows-msvc" -NewName "watcher"
+      - name: Download PHP
+        run: |
+          $webContent = Invoke-WebRequest -Uri $env:PHP_DOWNLOAD_BASE
+          $esc = [regex]::Escape($env:PHPV)
+          $links = $webContent.Links.Href | Where-Object { $_ -match "php-$esc(-\d+)?-Win32-vs\d+-x64\.zip$" }
+          if (-not $links) { throw "No Windows ZTS build of PHP $env:PHPV at $env:PHP_DOWNLOAD_BASE" }
+          $latestFile = $links | Sort-Object { if ($_ -match '(\d+\.\d+\.\d+)(?:-(\d+))?-Win32') { [version]"$($matches[1]).$([int]$matches[2])" } } | Select-Object -Last 1
+          if ($latestFile -match '((\d+\.\d+\.\d+)(?:-\d+)?)-Win32-(vs\d+)') { $build = $matches[1]; $vs = $matches[3] }
+          Write-Host "Using $latestFile"
+          $phpZip = "php-$build-Win32-$vs-x64.zip"
+          $develZip = "php-devel-pack-$build-Win32-$vs-x64.zip"
+          Invoke-WebRequest -Uri "$env:PHP_DOWNLOAD_BASE/$phpZip" -OutFile "$env:TEMP\php.zip"
+          Expand-Archive -Path "$env:TEMP\php.zip" -DestinationPath "$env:GITHUB_WORKSPACE\$env:DIR_NAME"
+          Invoke-WebRequest -Uri "$env:PHP_DOWNLOAD_BASE/$develZip" -OutFile "$env:TEMP\php-devel.zip"
+          Expand-Archive -Path "$env:TEMP\php-devel.zip" -DestinationPath "$env:GITHUB_WORKSPACE\php-devel"
+          # Same as upstream: drop LTCG CLI objects lld-link cannot read (VS18 packs).
+          $embedLib = "$env:GITHUB_WORKSPACE\$env:DIR_NAME\php8embed.lib"
+          if (Test-Path "C:\Program Files\LLVM\bin\llvm-ar.exe") {
+            $llvmAr = "C:\Program Files\LLVM\bin\llvm-ar.exe"
+          } else {
+            $llvmAr = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\bin\llvm-ar.exe"
+          }
+          $ltcgMembers = & $llvmAr t $embedLib | Where-Object { $_ -match '\\sapi\\cli\\.*\.obj$' }
+          if ($ltcgMembers) { & $llvmAr d $embedLib @ltcgMembers }
+      - name: Prepare env
+        run: |
+          $version = $env:TAG.TrimStart('v')
+          "FRANKENPHP_VERSION=$version" >> $env:GITHUB_ENV
+          $vcpkgRoot = "$env:GITHUB_WORKSPACE\frankenphp\vcpkg_installed\x64-windows"
+          $watcherRoot = "$env:GITHUB_WORKSPACE\watcher"
+          $phpBin = "$env:GITHUB_WORKSPACE\$env:DIR_NAME"
+          $phpDevel = (Get-ChildItem "$env:GITHUB_WORKSPACE\php-devel" -Directory | Select-Object -First 1).FullName
+          "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\bin" >> $env:GITHUB_PATH
+          "$vcpkgRoot\bin" >> $env:GITHUB_PATH
+          "$watcherRoot" >> $env:GITHUB_PATH
+          "$phpBin" >> $env:GITHUB_PATH
+          "PKG_CONFIG_PATH=$vcpkgRoot\lib\pkgconfig" >> $env:GITHUB_ENV
+          "CGO_CFLAGS=-DFRANKENPHP_VERSION=$version -I$vcpkgRoot\include -I$watcherRoot -I$phpDevel\include -I$phpDevel\include\main -I$phpDevel\include\TSRM -I$phpDevel\include\Zend -I$phpDevel\include\ext" >> $env:GITHUB_ENV
+          "CGO_LDFLAGS=-L$vcpkgRoot\lib -lbrotlienc -L$watcherRoot -llibwatcher-c -L$phpBin -L$phpDevel\lib -lphp8ts -lphp8embed" >> $env:GITHUB_ENV
+      - name: Build FrankenPHP
+        working-directory: frankenphp\caddy\frankenphp
+        run: |
+          $customVersion = "FrankenPHP $env:FRANKENPHP_VERSION PHP $env:PHPV Caddy"
+          go build -ldflags="-extldflags=-fuse-ld=lld -X 'github.com/caddyserver/caddy/v2.CustomVersion=$customVersion' -X 'github.com/caddyserver/caddy/v2.CustomBinaryName=frankenphp' -X 'github.com/caddyserver/caddy/v2/modules/caddyhttp.ServerHeader=FrankenPHP Caddy'"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Assemble and check
+        run: |
+          Copy-Item frankenphp\caddy\frankenphp\frankenphp.exe $env:DIR_NAME
+          Copy-Item watcher\libwatcher-c.dll $env:DIR_NAME
+          Copy-Item frankenphp\vcpkg_installed\x64-windows\bin\brotlienc.dll $env:DIR_NAME
+          Copy-Item frankenphp\vcpkg_installed\x64-windows\bin\brotlidec.dll $env:DIR_NAME
+          Copy-Item frankenphp\vcpkg_installed\x64-windows\bin\brotlicommon.dll $env:DIR_NAME
+          Copy-Item frankenphp\vcpkg_installed\x64-windows\bin\pthreadVC3.dll $env:DIR_NAME
+          & "$env:DIR_NAME\frankenphp.exe" version
+          $got = & "$env:DIR_NAME\frankenphp.exe" php-cli -r 'echo PHP_VERSION;'
+          Write-Host "embedded PHP $got"
+          if ($got -ne $env:PHPV) { throw "expected PHP $env:PHPV, got $got" }
+          New-Item -ItemType Directory -Force out | Out-Null
+          Compress-Archive -Path "$env:DIR_NAME\*" -DestinationPath "out\frankenphp-windows-x86_64-php$env:PHPV.zip"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: out\frankenphp-windows-x86_64-php${{ matrix.php }}.zip
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "FrankenPHP $TAG" \
+                 --notes "FrankenPHP $TAG (github.com/php/frankenphp) built against several PHP versions. Unofficial builds made by this repository's Build workflow from upstream sources; see the README." \
+            || true
+          gh release upload "$TAG" "out/frankenphp-windows-x86_64-php$PHPV.zip" --repo "$GITHUB_REPOSITORY" --clobber
