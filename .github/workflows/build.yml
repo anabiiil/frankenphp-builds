@@ -134,7 +134,7 @@ jobs:
           set -euo pipefail
           bin=dist/frankenphp-mac-arm64
           "$bin" version
-          "$bin" list-modules | grep -q frankenphp
+          "$bin" list-modules | grep frankenphp >/dev/null
           got=$("$bin" php-cli -r 'echo PHP_VERSION;')
           echo "embedded PHP $got"
           [ "$got" = "$PHPV" ] || { echo "expected PHP $PHPV"; exit 1; }
