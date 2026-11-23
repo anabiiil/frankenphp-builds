@@ -239,14 +239,20 @@ jobs:
           $watcherRoot = "$env:GITHUB_WORKSPACE\watcher"
           $phpBin = "$env:GITHUB_WORKSPACE\$env:DIR_NAME"
           $phpDevel = (Get-ChildItem "$env:GITHUB_WORKSPACE\php-devel" -Directory | Select-Object -First 1).FullName
+          # Older PHP headers (8.3) call _AddressOfReturnAddress without
+          # including <intrin.h>; MSVC tolerates that, clang does not.
+          $callStack = "$phpDevel\include\Zend\zend_call_stack.h"
+          if ((Test-Path $callStack) -and (Select-String -Path $callStack -SimpleMatch '_AddressOfReturnAddress' -Quiet) -and -not (Select-String -Path $callStack -SimpleMatch '<intrin.h>' -Quiet)) {
+            Write-Host "Adding #include <intrin.h> to zend_call_stack.h"
+            $body = Get-Content $callStack -Raw
+            Set-Content -Path $callStack -Value ("#ifdef _WIN32`n#include <intrin.h>`n#endif`n" + $body) -NoNewline
+          }
           "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\bin" >> $env:GITHUB_PATH
           "$vcpkgRoot\bin" >> $env:GITHUB_PATH
           "$watcherRoot" >> $env:GITHUB_PATH
           "$phpBin" >> $env:GITHUB_PATH
           "PKG_CONFIG_PATH=$vcpkgRoot\lib\pkgconfig" >> $env:GITHUB_ENV
-          # PHP <= 8.4 headers use _AddressOfReturnAddress without including intrin.h,
-          # which clang rejects; force-include it (harmless for newer branches).
-          "CGO_CFLAGS=-include intrin.h -DFRANKENPHP_VERSION=$version -I$vcpkgRoot\include -I$watcherRoot -I$phpDevel\include -I$phpDevel\include\main -I$phpDevel\include\TSRM -I$phpDevel\include\Zend -I$phpDevel\include\ext" >> $env:GITHUB_ENV
+          "CGO_CFLAGS=-DFRANKENPHP_VERSION=$version -I$vcpkgRoot\include -I$watcherRoot -I$phpDevel\include -I$phpDevel\include\main -I$phpDevel\include\TSRM -I$phpDevel\include\Zend -I$phpDevel\include\ext" >> $env:GITHUB_ENV
           "CGO_LDFLAGS=-L$vcpkgRoot\lib -lbrotlienc -L$watcherRoot -llibwatcher-c -L$phpBin -L$phpDevel\lib -lphp8ts -lphp8embed" >> $env:GITHUB_ENV
       - name: Build FrankenPHP
         working-directory: frankenphp\caddy\frankenphp
