@@ -244,7 +244,9 @@ jobs:
           "$watcherRoot" >> $env:GITHUB_PATH
           "$phpBin" >> $env:GITHUB_PATH
           "PKG_CONFIG_PATH=$vcpkgRoot\lib\pkgconfig" >> $env:GITHUB_ENV
-          "CGO_CFLAGS=-DFRANKENPHP_VERSION=$version -I$vcpkgRoot\include -I$watcherRoot -I$phpDevel\include -I$phpDevel\include\main -I$phpDevel\include\TSRM -I$phpDevel\include\Zend -I$phpDevel\include\ext" >> $env:GITHUB_ENV
+          # PHP <= 8.4 headers use _AddressOfReturnAddress without including intrin.h,
+          # which clang rejects; force-include it (harmless for newer branches).
+          "CGO_CFLAGS=-include intrin.h -DFRANKENPHP_VERSION=$version -I$vcpkgRoot\include -I$watcherRoot -I$phpDevel\include -I$phpDevel\include\main -I$phpDevel\include\TSRM -I$phpDevel\include\Zend -I$phpDevel\include\ext" >> $env:GITHUB_ENV
           "CGO_LDFLAGS=-L$vcpkgRoot\lib -lbrotlienc -L$watcherRoot -llibwatcher-c -L$phpBin -L$phpDevel\lib -lphp8ts -lphp8embed" >> $env:GITHUB_ENV
       - name: Build FrankenPHP
         working-directory: frankenphp\caddy\frankenphp
