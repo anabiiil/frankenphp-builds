@@ -256,10 +256,10 @@ jobs:
           "$watcherRoot" >> $env:GITHUB_PATH
           "$phpBin" >> $env:GITHUB_PATH
           "PKG_CONFIG_PATH=$vcpkgRoot\lib\pkgconfig" >> $env:GITHUB_ENV
-          # Older PHP embed libs (8.3, vs16) also define _tsrm_ls_cache, which
+          # PHP embed libs before 8.6 (vs16/vs17) also define _tsrm_ls_cache, which
           # FrankenPHP defines too; both are the same TLS cache, keep one.
           $forceMultiple = ""
-          if ([version]$env:PHPV -lt [version]"8.5.0") { $forceMultiple = "-Wl,/FORCE:MULTIPLE" }
+          if ([version]$env:PHPV -lt [version]"8.6.0") { $forceMultiple = "-Wl,/FORCE:MULTIPLE" }
           "CGO_CFLAGS=-DFRANKENPHP_VERSION=$version -I$vcpkgRoot\include -I$watcherRoot -I$phpDevel\include -I$phpDevel\include\main -I$phpDevel\include\TSRM -I$phpDevel\include\Zend -I$phpDevel\include\ext" >> $env:GITHUB_ENV
           "CGO_LDFLAGS=$forceMultiple -L$vcpkgRoot\lib -lbrotlienc -L$watcherRoot -llibwatcher-c -L$phpBin -L$phpDevel\lib -lphp8ts -lphp8embed" >> $env:GITHUB_ENV
       - name: Build FrankenPHP
