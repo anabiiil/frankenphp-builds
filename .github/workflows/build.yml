@@ -76,7 +76,11 @@ jobs:
                 mac=$(jq -c --arg b "$b" --arg v "$v" '. + [{branch:$b, php:$v}]' <<<"$mac")
               fi
             fi
-            if [[ " $PLATFORMS " == *" windows "* ]]; then
+            # FrankenPHP's Windows build doesn't link against PHP 8.2/8.3's
+            # official Windows libraries (see README), so those stay mac-only.
+            if [[ " $PLATFORMS " == *" windows "* ]] && [[ "$b" == 8.2 || "$b" == 8.3 ]]; then
+              echo "windows $b: not built (unsupported, see README)"
+            elif [[ " $PLATFORMS " == *" windows "* ]]; then
               v=$(grep -E "^php-${b//./\\.}\.[0-9]+" <<<"$winlist" \
                 | sed -E 's/^php-([0-9.]+).*/\1/' | sort -V | tail -1 || true)
               if [ -z "$v" ]; then

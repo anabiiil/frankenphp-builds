@@ -23,6 +23,16 @@ gh attestation verify frankenphp-mac-arm64-php8.4.27 --repo anabiiil/frankenphp-
 
 ## Availability
 
-Branches that fail to build on a platform are listed here.
+| PHP | macOS arm64 | Windows x64 |
+|---|---|---|
+| 8.6 | ✓ | ✓ |
+| 8.5 | ✓ | ✓ |
+| 8.4 | ✓ | ✓ |
+| 8.3 | ✓ | — |
+| 8.2 | ✓ | — |
+
+On Windows, FrankenPHP doesn't link against the official PHP 8.2/8.3 Windows
+development packs (vs16 toolchain: duplicate `_tsrm_ls_cache`, then missing
+imports from `php8ts.lib`), so those branches are macOS-only.
 
 FrankenPHP is MIT licensed, © Kévin Dunglas. PHP is under the PHP License.
